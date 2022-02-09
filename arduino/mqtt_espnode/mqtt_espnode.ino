@@ -1,7 +1,7 @@
 //#define RFID_MODE
-//#define BUTTON_MODE
+#define BUTTON_MODE
 
-#define MULTI_SENSOR_MODE
+//#define MULTI_SENSOR_MODE
 
 #ifdef RFID_MODE
 #ifdef MULTI_SENSOR_MODE
@@ -24,9 +24,7 @@
 #include <WiFiManager.h>
 #include <MQTTClient.h>
 #include <RemoteDebug.h>
-#include <WebSockets.h>
-#include <WebSocketsClient.h>
-#include <WebSocketsServer.h>
+#include <OneButton.h>
 
 #ifdef ESP8266
 #include <ESP8266WebServer.h>
@@ -36,6 +34,10 @@
 #include <HTTPUpdateServer.h>
 #else
 #error "Wrong board - ESP8266 or ESP32 must be used."
+#endif
+
+#ifdef BUTTON_MODE
+#include <OneButton.h>
 #endif
 
 #ifdef RFID_MODE
@@ -50,7 +52,7 @@
 
 //***** ESP Node *****//
 char fwName[16] = "mqtt_espnode";         // Name of the firmware
-char fwVersion[8] = "0.1-1";              // Version of the firmware
+char fwVersion[8] = "0.1-2";              // Version of the firmware
 byte espMac[6];                           // Byte array to store our MAC address
 
 char nodeName[32] = "espnode";                  // Nodes name - default value, may be overridden
@@ -93,6 +95,60 @@ char mqttTopic[128] = "";              // MQTT Topic - Default value, maybe over
 const char mqttDefaultTopicBase[16] = "espnodes/";    // MQTT Base for default topic
 const char mqttAvailableSubTopic[16] = "available";   // MQTT available sub topic topic
 boolean mqttAvailableMsgPending = false;              // MQTT flag indicating if availability status is pending
+
+//***** BUTTON *****//
+#ifdef BUTTON_MODE
+#define BTN_TYPE_SINGLE 1
+#define BTN_TYPE_DOUBLE 2
+#define BTN_TYPE_MULTI 3
+#define BTN_TYPE_LONG 4
+#define BTN_CMD_1X "Cmd1x"
+#define BTN_CMD_2X "Cmd2x"
+#define BTN_CMD_MU "CmdMu"
+#define BTN_CMD_LO "CmdLo"
+
+int currentButtonIndex = 0;                       // Control variable for loop
+
+const char BTN_CMD_SEPERATOR[2] = "#";
+
+#ifdef ESP8266
+#ifdef RFID_MODE
+const uint16_t NUM_OF_BUTTONS = 3;
+int btnId[NUM_OF_BUTTONS] = { 0, 1, 2 };
+const char btnName[NUM_OF_BUTTONS][16] = { "btnD1", "btnD2", "btnA0" };
+char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "" };
+char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "" };
+char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "" };
+char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "" };
+int btnPins[NUM_OF_BUTTONS] = { D1, D2, A0 };
+OneButton *btnArray[NUM_OF_BUTTONS];
+#else
+const uint16_t NUM_OF_BUTTONS = 6;
+int btnId[NUM_OF_BUTTONS] = { 0, 1, 2, 3, 4, 5 };
+const char btnName[NUM_OF_BUTTONS][16] = { "btnD1", "btnD2", "btnD5", "btnD6", "btnD7", "btnA0" };
+char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
+char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
+char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
+char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
+int btnPins[NUM_OF_BUTTONS] = { D1, D2, D5, D6, D7, A0 };
+OneButton *btnArray[NUM_OF_BUTTONS];
+#endif
+
+#elif ESP32
+const uint16_t NUM_OF_BUTTONS = 20;
+int btnId[NUM_OF_BUTTONS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 };
+const char btnName[NUM_OF_BUTTONS][16] = { "btn05", "btn13", "btn14", "btn15", "btn16", "btn17", "btn18", "btn19", "btn21", "btn22", "btn23", "btn25", "btn26", "btn27", "btn32", "btn33", "btn34", "btn35", "btn36", "btn39" };
+char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+int btnPins[NUM_OF_BUTTONS] = { 5, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33, 34, 35, 36, 39 };
+OneButton *btnArray[NUM_OF_BUTTONS];
+
+#else
+#error "Wrong board - ESP8266 or ESP32 must be used."
+#endif
+#endif
 
 //***** RFID *****//
 #ifdef RFID_MODE
@@ -156,6 +212,9 @@ unsigned long multiMotionHoldTimer = 0;    // Timestamp used to measure hold tim
 
 //***** HTML Text - Root *****//
 const char HTML_ROOT_SETTINGS[] PROGMEM = "<a href='/settings'><button>Settings</button></a>";
+#ifdef BUTTON_MODE
+const char HTML_ROOT_BUTTONS[] PROGMEM = "<hr><a href='/buttons'><button>Buttons</button></a>";
+#endif
 #ifdef RFID_MODE
 const char HTML_ROOT_RFID[] PROGMEM = "<hr><a href='/rfid'><button>RFID</button></a>";
 #endif
@@ -185,8 +244,8 @@ const char HTML_SETTINGS_BTN_BACK[] PROGMEM ="<hr><a href='/'><button>Back</butt
 //***** HTML Text - SaveSetting *****//
 const char HTML_SAVESETTINGS_START_REDIR_15SEC[] PROGMEM = "<meta http-equiv='refresh' content='15;url={redirectUrl}' />";
 const char HTML_SAVESETTINGS_START_REDIR_3SEC[] PROGMEM = "<meta http-equiv='refresh' content='3;url={redirectUrl}' />";
-const char HTML_SAVESETTINGS_SAVE_RESTART[] PROGMEM = "<br/>Saving updated configuration values and restarting device ... <a href='{redirectUrl}'>redirecting</a>";
-const char HTML_SAVESETTINGS_SAVE_NORESTART[] PROGMEM = "<br/>Saving updated configuration values and updating device ... redirecting to <a href='{redirectUrl}'>redirecting</a>";
+const char HTML_SAVESETTINGS_SAVE_RESTART[] PROGMEM = "<br/>Saving updated configuration values and restarting device ... <a href='{redirectUrl}'>redirect</a>";
+const char HTML_SAVESETTINGS_SAVE_NORESTART[] PROGMEM = "<br/>Saving updated configuration values and updating device ... <a href='{redirectUrl}'>redirect</a>";
 const char HTML_SAVESETTINGS_NOCHANGE[] PROGMEM = "<br/>No changes found ... redirecting to <a href='{redirectUrl}'>redirecting</a>";
 const char HTML_REPLACE_REDIRURL[] PROGMEM = "{redirectUrl}";
 
@@ -203,6 +262,20 @@ const char HTML_STATUS_SIGSTRENGTH[] PROGMEM = "<br/><b>Signal Strength: </b> {s
 const char HTML_STATUS_UPTIME[] PROGMEM = "<br/><b>Uptime: </b> {uptime} sec";
 const char HTML_STATUS_BTN_BACK[] PROGMEM = "<hr><a href='/'><button>Back</button></a>";
 
+//***** HTML Text - BUTTON *****//
+#ifdef BUTTON_MODE
+const char HTML_BUTTONS_FORM_START[] PROGMEM = "<form method='POST' action='saveButtons'>";
+const char HTML_BUTTONS_SECTION_START[] PROGMEM = "<h3>{buttonName}</h3>";
+const char HTML_BUTTONS_CMD_1X[] PROGMEM = "<b>Command Single</b> <i><small>(disabled, if empty)</small></i>";
+const char HTML_BUTTONS_CMD_2X[] PROGMEM = "<br/><b>Command Double</b> <i><small>(disabled, if empty)</small></i>";
+const char HTML_BUTTONS_CMD_MULTI[] PROGMEM = "<br/><b>Command Multi</b> <i><small>(disabled, if empty)</small></i>";
+const char HTML_BUTTONS_CMD_LONG[] PROGMEM = "<br/><b>Command Long</b> <i><small>(disabled, if empty)</small></i>";
+const char HTML_BUTTONS_CMD_MQTT[] PROGMEM = "<input id='{btnCfgId}' name='{btnCfgId}' maxlength=127 placeholder='{btnDefaultCmd}' value='{btnCmd}'>";
+const char HTML_BUTTONS_FORM_END[] PROGMEM ="<br/><br/><button type='submit'>Save</button></form>";
+const char HTML_BUTTONS_BTN_BACK[] PROGMEM = "<hr><a href='/'><button>Back</button></a>";
+
+#endif
+
 //***** HTML Text - RFID *****//
 #ifdef RFID_MODE
 const char HTML_RFID_STATUS[] PROGMEM = "<b>RFID-Status: </b> {rfidControllerData}";
@@ -210,6 +283,7 @@ const char HTML_RFID_LASTNUID[] PROGMEM = "<br/><b>Last RFID: </b> {rfidNuidStri
 const char HTML_RFID_BTN_BACK[] PROGMEM = "<hr><a href='/'><button>Back</button></a>";
 #endif
 
+//***** HTML Text - MULTISENSOR *****//
 #ifdef MULTI_SENSOR_MODE
 const char HTML_MULTI_FORM_START[] PROGMEM = "<form method='POST' action='saveMulti'>";
 const char HTML_MULTI_ADC_STATUS[] PROGMEM = "<b>ADC Status</b><input id='multiAdcSensorInitialized' readonly name='multiAdcSensorInitialized' placeholder='unknown' value='{multiAdcSensorInitialized}'>";
@@ -240,6 +314,10 @@ void setup() {
 
     webSetup();
 
+#ifdef BUTTON_MODE
+    btnSetup();
+#endif
+
 #ifdef RFID_MODE
     rfidSetup();
 #endif
@@ -261,6 +339,10 @@ void loop() {
 
     webLoop();
 
+#ifdef BUTTON_MODE
+    btnLoop();
+#endif
+
 #ifdef RFID_MODE
     rfidLoop();
 #endif
@@ -268,8 +350,6 @@ void loop() {
 #ifdef MULTI_SENSOR_MODE
     multiLoop();
 #endif
-
-    delay(100);
 }
 
 //*****************************************************************************************************************//
@@ -313,8 +393,8 @@ void debugSetupFinalize() {
     if (!debugSerialEnabled) {
         debugPrintln(String(F("SYSTEM: Stopping serial debug due to configuration")));
 
-       Serial.flush();
-       Serial.end();
+        Serial.flush();
+        Serial.end();
     }
 
     if (!debugRemoteEnabled) {
@@ -663,6 +743,11 @@ void webSetup() {
     webServer.on("/saveSettings", webHandleSaveSettings);
     webServer.on("/status", webHandleStatus);
 
+#ifdef BUTTON_MODE
+    webServer.on("/buttons", webHandleButtons);
+    webServer.on("/saveButtons", webHandleSaveButtons);
+#endif
+
 #ifdef RFID_MODE
     webServer.on("/rfid", webHandleRfid);
 #endif
@@ -754,6 +839,11 @@ void webHandleRoot() {
     webStartHttpMsg(String(F("Navigation")), 200);
 
     webSendHttpContent(HTML_ROOT_SETTINGS);
+
+#ifdef BUTTON_MODE
+    webSendHttpContent(HTML_ROOT_BUTTONS);
+#endif
+
 #ifdef RFID_MODE
     webSendHttpContent(HTML_ROOT_RFID);
 #endif
@@ -761,6 +851,7 @@ void webHandleRoot() {
 #ifdef MULTI_SENSOR_MODE
     webSendHttpContent(HTML_ROOT_MULTI);
 #endif
+
     webSendHttpContent(HTML_ROOT_STATUS);
 
     webEndHttpMsg();
@@ -959,6 +1050,348 @@ void webLoop() {
     webServer.handleClient();
 }
 
+//***** BUTTON Functions *****//
+#ifdef BUTTON_MODE
+void btnSetup() {
+    // Load button config if available
+    btnConfigRead();
+
+    for (int btnIndex = 0; btnIndex < NUM_OF_BUTTONS; btnIndex++) {
+        btnArray[btnIndex] = new OneButton(btnPins[btnIndex], false, false);
+
+        btnArray[btnIndex]->attachClick(btnSingleClick, &btnId[btnIndex]);
+        btnArray[btnIndex]->attachDoubleClick(btnDoubleClick, &btnId[btnIndex]);
+        btnArray[btnIndex]->attachMultiClick(btnMultiClick, &btnId[btnIndex]);
+
+        btnArray[btnIndex]->attachLongPressStart(btnLongPressStart, &btnId[btnIndex]);
+    }
+
+    delay(1000);        // wait for pins to set down
+}
+
+String btnSplitMqttCmd(String data, bool command) {
+    int delimiter = data.indexOf(BTN_CMD_SEPERATOR);
+
+    if (delimiter > 0) {
+        if (!command) {
+            return data.substring(0, delimiter);
+        }
+        else {
+            return data.substring(delimiter + 1);
+        }
+    }
+
+    return "";
+}
+
+void btnSingleClick(void *btnIndex) {
+    debugPrintln(String(F("BTN: Button ")) + *(int*) btnIndex + String(F(" single click.")));
+
+    int index = *(int*) btnIndex;
+    String mqttCmd = btnGetMqttCmd(index, BTN_TYPE_SINGLE, true);
+
+    String topic = btnSplitMqttCmd(mqttCmd, false);
+    String cmd = btnSplitMqttCmd(mqttCmd, true);
+
+    if (!topic.isEmpty() && !cmd.isEmpty()) {
+        mqttClient.publish(topic, cmd);
+        debugPrintln(String(F("** BTN: Send MQTT[Topic|Cmd] ")) + topic + String(F("|")) + cmd);
+    }
+    else {
+        debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for singleclick defined [")) + mqttCmd + String(F("]")));
+    }
+}
+
+void btnDoubleClick(void *btnIndex) {
+    debugPrintln(String(F("BTN: Button ")) + *(int*) btnIndex + String(F(" double click.")));
+
+    int index = *(int*) btnIndex;
+    String mqttCmd = btnGetMqttCmd(index, BTN_TYPE_DOUBLE, true);
+
+    String topic = btnSplitMqttCmd(mqttCmd, false);
+    String cmd = btnSplitMqttCmd(mqttCmd, true);
+
+    if (!topic.isEmpty() && !cmd.isEmpty()) {
+        mqttClient.publish(topic, cmd);
+        debugPrintln(String(F("** BTN: Send MQTT[Topic|Cmd] ")) + topic + String(F("|")) + cmd);
+    }
+    else {
+        debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for doubleclick defined [")) + mqttCmd + String(F("]")));
+    }
+}
+
+void btnMultiClick(void *btnIndex) {
+    debugPrintln(String(F("BTN: Button ")) + *(int*) btnIndex + String(F(" multi click.")));
+
+    int index = *(int*) btnIndex;
+    String mqttCmd = btnGetMqttCmd(index, BTN_TYPE_MULTI, true);
+
+    String topic = btnSplitMqttCmd(mqttCmd, false);
+    String cmd = btnSplitMqttCmd(mqttCmd, true);
+
+    if (!topic.isEmpty() && !cmd.isEmpty()) {
+        mqttClient.publish(topic, cmd);
+        debugPrintln(String(F("** BTN: Send MQTT[Topic|Cmd] ")) + topic + String(F("|")) + cmd);
+    }
+    else {
+        debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for multiclick defined [")) + mqttCmd + String(F("]")));
+    }
+}
+
+void btnLongPressStart(void *btnIndex) {
+    debugPrintln(String(F("BTN: Button ")) + *(int*) btnIndex + String(F(" long click.")));
+
+    int index = *(int*) btnIndex;
+    String mqttCmd = btnGetMqttCmd(index, BTN_TYPE_LONG, true);
+
+    String topic = btnSplitMqttCmd(mqttCmd, false);
+    String cmd = btnSplitMqttCmd(mqttCmd, true);
+
+    if (!topic.isEmpty() && !cmd.isEmpty()) {
+        mqttClient.publish(topic, cmd);
+        debugPrintln(String(F("** BTN: Send MQTT[Topic|Cmd] ")) + topic + String(F("|")) + cmd);
+    }
+    else {
+        debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for longclick defined [")) + mqttCmd + String(F("]")));
+    }
+}
+
+void btnLoop() {
+    btnArray[currentButtonIndex]->tick();
+
+    currentButtonIndex++;
+
+    if (currentButtonIndex >= NUM_OF_BUTTONS) {
+        currentButtonIndex = 0;
+    }
+
+    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
+        btnArray[index]->tick();
+    }
+}
+
+String btnGetCmdTypeId(int index, int type) {
+    switch (type) {
+    case BTN_TYPE_SINGLE:
+        return BTN_CMD_1X;
+    case BTN_TYPE_DOUBLE:
+        return BTN_CMD_2X;
+    case BTN_TYPE_MULTI:
+        return BTN_CMD_MU;
+    case BTN_TYPE_LONG:
+        return BTN_CMD_LO;
+    }
+
+    return String(F("CmdTypeUnknown"));
+}
+
+String btnGetConfigId(int index, int type) {
+    String configId = btnName[index];
+    configId += btnGetCmdTypeId(index, type);
+
+    return configId;
+}
+
+String btnGetMqttCmd(int index, int type, bool defaultIfEmpty) {
+    String mqttCmd = "";
+
+    switch (type) {
+    case BTN_TYPE_SINGLE:
+        mqttCmd = btnMqttCmdSingle[index];
+        break;
+    case BTN_TYPE_DOUBLE:
+        mqttCmd = btnMqttCmdDouble[index];
+        break;
+    case BTN_TYPE_MULTI:
+        mqttCmd = btnMqttCmdMulti[index];
+        break;
+    case BTN_TYPE_LONG:
+        mqttCmd = btnMqttCmdLong[index];
+        break;
+    }
+
+    if (defaultIfEmpty && mqttCmd.isEmpty()) {
+        mqttCmd = btnGetDefaultMqttCmd(index, type);
+    }
+
+    return mqttCmd;
+}
+
+String btnGetDefaultMqttCmd(int index, int type) {
+    String mqttCmd = mqttGetNodeTopic(btnName[index]);
+    mqttCmd += BTN_CMD_SEPERATOR + btnGetCmdTypeId(index, type);
+
+    return mqttCmd;
+}
+
+String btnGetBtnHtmlMqttCmd(int index, int type) {
+    String btnConfigId = btnGetConfigId(index, type);
+
+    String htmlMsg = HTML_BUTTONS_CMD_MQTT;
+    htmlMsg.replace(String(F("{btnCfgId}")), btnConfigId);
+    htmlMsg.replace(String(F("{btnDefaultCmd}")), btnGetDefaultMqttCmd(index, type));
+    htmlMsg.replace(String(F("{btnCmd}")), btnGetMqttCmd(index, type, false));
+
+    return htmlMsg;
+}
+
+void btnConfigRead() {
+    // Read saved multiConfig.json from SPIFFS
+    debugPrintln(F("SPIFFS: mounting SPIFFS"));
+
+#ifdef ESP8266
+    if (SPIFFS.begin()) {
+#endif
+#ifdef ESP32
+    if (SPIFFS.begin(true)) {
+#endif
+        if (SPIFFS.exists("/buttonConfig.json")) { // File exists, reading and loading
+            debugPrintln(F("SPIFFS: reading /buttonConfig.json"));
+
+            File configFile = SPIFFS.open("/buttonConfig.json", "r");
+            if (configFile) {
+                size_t configFileSize = configFile.size(); // Allocate a buffer to store contents of the file.
+                std::unique_ptr<char[]> buf(new char[configFileSize]);
+                configFile.readBytes(buf.get(), configFileSize);
+
+                DynamicJsonDocument configJson(CONFIG_SIZE);
+                DeserializationError jsonError = deserializeJson(configJson, buf.get());
+
+                if (jsonError) { // Couldn't parse the saved config
+                    bool removedJson = SPIFFS.remove("/buttonConfig.json");
+
+                    debugPrintln(String(F("SPIFFS: [ERROR] Failed to parse /buttonConfig.json: ")) + String(jsonError.c_str()));
+
+                    if (removedJson) {
+                        debugPrintln(String(F("SPIFFS: Removed corrupt file /buttonConfig.json")));
+                    }
+                    else {
+                        debugPrintln(String(F("SPIFFS: [ERROR] Corrupt file /buttonConfig.json could not be removed")));
+
+                    }
+                }
+                else {
+                    // Read Button configuration
+                    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
+                        strcpy(btnMqttCmdSingle[index], configJson[btnGetConfigId(index, BTN_TYPE_SINGLE)]);
+                        strcpy(btnMqttCmdDouble[index], configJson[btnGetConfigId(index, BTN_TYPE_DOUBLE)]);
+                        strcpy(btnMqttCmdMulti[index], configJson[btnGetConfigId(index, BTN_TYPE_MULTI)]);
+                        strcpy(btnMqttCmdLong[index], configJson[btnGetConfigId(index, BTN_TYPE_LONG)]);
+                    }
+
+                    // Print read JSON configuration
+                    String configJsonStr;
+                    serializeJson(configJson, configJsonStr);
+
+                    debugPrintln(String(F("SPIFFS: parsed json:")) + configJsonStr);
+                }
+            }
+            else {
+                debugPrintln(F("SPIFFS: [ERROR] File not found /buttonConfig.json"));
+            }
+        }
+        else {
+            debugPrintln(F("SPIFFS: [WARNING] /buttonConfig.json not found, will be created on first config save"));
+        }
+    }
+    else {
+        debugPrintln(F("SPIFFS: [ERROR] Failed to mount FS"));
+    }
+}
+
+void btnConfigSave() { // Save the parameters to config.json
+    debugPrintln(F("SPIFFS: Saving button config"));
+    DynamicJsonDocument jsonConfigValues(CONFIG_SIZE);
+
+    // Save button configuration
+    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
+        jsonConfigValues[btnGetConfigId(index, BTN_TYPE_SINGLE)] = btnMqttCmdSingle[index];
+        jsonConfigValues[btnGetConfigId(index, BTN_TYPE_DOUBLE)] = btnMqttCmdDouble[index];
+        jsonConfigValues[btnGetConfigId(index, BTN_TYPE_MULTI)] = btnMqttCmdMulti[index];
+        jsonConfigValues[btnGetConfigId(index, BTN_TYPE_LONG)] = btnMqttCmdLong[index];
+    }
+
+    File configFile = SPIFFS.open("/buttonConfig.json", "w");
+    if (!configFile) {
+        debugPrintln(F("SPIFFS: Failed to open config file for writing"));
+    }
+    else {
+        serializeJson(jsonConfigValues, configFile);
+        configFile.close();
+
+        // Print saved JSON configuration
+        String configJsonStr;
+        serializeJson(jsonConfigValues, configJsonStr);
+        debugPrintln(String(F("SPIFFS: saved json:")) + configJsonStr);
+    }
+
+    delay(500);
+}
+
+void webHandleButtons() {
+    debugPrintln(String(F("HTTP: WebHandleButtons called from client: ")) + webServer.client().remoteIP().toString());
+
+    webStartHttpMsg(String(F("Buttons")), 200);
+    webSendHttpContent(HTML_BUTTONS_FORM_START);
+
+    String configButtonId;
+    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
+        // Prepare and send a html part for each button
+        webSendHttpContent(HTML_BUTTONS_SECTION_START, String(F("{buttonName}")), btnName[index]);
+
+        webSendHttpContent(HTML_BUTTONS_CMD_1X);
+        webSendHttpContent(btnGetBtnHtmlMqttCmd(index, BTN_TYPE_SINGLE));
+
+        webSendHttpContent(HTML_BUTTONS_CMD_2X);
+        webSendHttpContent(btnGetBtnHtmlMqttCmd(index, BTN_TYPE_DOUBLE));
+
+        webSendHttpContent(HTML_BUTTONS_CMD_MULTI);
+        webSendHttpContent(btnGetBtnHtmlMqttCmd(index, BTN_TYPE_MULTI));
+
+        webSendHttpContent(HTML_BUTTONS_CMD_LONG);
+        webSendHttpContent(btnGetBtnHtmlMqttCmd(index, BTN_TYPE_LONG));
+    }
+
+    webSendHttpContent(HTML_BUTTONS_FORM_END);
+    webSendHttpContent(HTML_BUTTONS_BTN_BACK);
+
+    webEndHttpMsg();
+}
+
+void webHandleSaveButtons() {
+    debugPrintln(String(F("HTTP: WebHandleSaveButtons called from client: ")) + webServer.client().remoteIP().toString());
+
+//check if button settings have changed
+    String data = "";
+    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
+
+        data = webServer.arg(btnGetConfigId(index, BTN_TYPE_SINGLE));
+        data.trim();
+        strcpy(btnMqttCmdSingle[index], data.c_str());
+
+        data = webServer.arg(btnGetConfigId(index, BTN_TYPE_DOUBLE));
+        data.trim();
+        strcpy(btnMqttCmdDouble[index], data.c_str());
+
+        data = webServer.arg(btnGetConfigId(index, BTN_TYPE_MULTI));
+        data.trim();
+        strcpy(btnMqttCmdMulti[index], data.c_str());
+
+        data = webServer.arg(btnGetConfigId(index, BTN_TYPE_LONG));
+        data.trim();
+        strcpy(btnMqttCmdLong[index], data.c_str());
+    }
+
+    // Config updated, notify user and trigger write of configurations
+    debugPrintln(String(F("HTTP: Sending /saveButtons page to client connected from: ")) + webServer.client().remoteIP().toString());
+    webStartHttpMsg(String(F("")), HTML_SAVESETTINGS_START_REDIR_15SEC, 200, String(F("/buttons")));
+    webSendHttpContent(HTML_SAVESETTINGS_SAVE_NORESTART, HTML_REPLACE_REDIRURL, String(F("/buttons")));
+    webEndHttpMsg();
+
+    btnConfigSave();
+}
+#endif
+
 //***** RFID Functions *****//
 #ifdef RFID_MODE
 
@@ -1071,7 +1504,7 @@ void webHandleRfid() {
 }
 #endif
 
-//***** Multi Sesnor Functions *****//
+//***** MULTISENSOR Functions *****//
 #ifdef MULTI_SENSOR_MODE
 
 void multiSetup() {
