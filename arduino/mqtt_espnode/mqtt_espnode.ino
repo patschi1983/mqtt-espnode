@@ -1,7 +1,6 @@
-#define DEBUG_ESPNODE
-
 //#define RFID_MODE
 //#define BUTTON_MODE
+
 #define MULTI_SENSOR_MODE
 
 #ifdef RFID_MODE
@@ -24,6 +23,10 @@
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
 #include <MQTTClient.h>
+#include <RemoteDebug.h>
+#include <WebSockets.h>
+#include <WebSocketsClient.h>
+#include <WebSocketsServer.h>
 
 #ifdef ESP8266
 #include <ESP8266WebServer.h>
@@ -47,7 +50,7 @@
 
 //***** ESP Node *****//
 char fwName[16] = "mqtt_espnode";         // Name of the firmware
-char fwVersion[8] = "0.1";                // Version of the firmware
+char fwVersion[8] = "0.1-1";              // Version of the firmware
 byte espMac[6];                           // Byte array to store our MAC address
 
 char nodeName[32] = "espnode";                  // Nodes name - default value, may be overridden
@@ -59,6 +62,9 @@ char configPassword[32] = "";                   // Password for web access - def
 const unsigned long CONNECT_TO = 300;           // Timeout for WiFi and MQTT connection attempts in seconds
 const unsigned long RECONNECT_TO = 15;          // Timeout for WiFi reconnection attempts in seconds
 const int CONFIG_SIZE = 10240;                  // Configuration size
+bool debugSerialEnabled = true;                 // Enable serial debug - default value, may be overridden
+bool debugRemoteEnabled = false;                // Enable remote debug - default value, may be overridden
+RemoteDebug debugRemote;                        // Handler for remote debug
 
 //***** WebServer *****//
 #ifdef ESP8266
@@ -171,6 +177,8 @@ const char HTML_SETTINGS_MQTT_USER[] PROGMEM = "<br/><b>MQTT User</b> <i><small>
 const char HTML_SETTINGS_MQTT_PASSWD[] PROGMEM = "<br/><b>MQTT Password</b> <i><small>(optional)</small></i><input id='mqttPassword' name='mqttPassword' type='password' maxlength=31 placeholder='mqttPassword' value='{mqttPassword}'>";
 const char HTML_SETTINGS_MQTT_TOPIC[] PROGMEM = "<br/><b>MQTT Topic</b> <i><small>(optional)</small></i><input id='mqttTopic' name='mqttTopic' maxlength=127 value='{mqttTopic}'>";
 const char HTML_SETTINGS_MQTT_STATUS[] PROGMEM ="<br/><b>MQTT Status</b><input id='mqttSatus' readonly name='mqttSatus' placeholder='mqttStatus' value='{mqttStatus}'>";
+const char HTML_SETTINGS_DEBUG_SERIAL[] PROGMEM = "<br/><br/><b>Debug Serial Enabled</b> <i><small>(0/1)</small></i><input id='debugSerialEnabled' name='debugSerialEnabled' type='number' min='0' max='1' value='{debugSerialEnabled}'>";
+const char HTML_SETTINGS_DEBUG_REMOTE[] PROGMEM ="<br/><b>Debug Remote Enabled</b><i> <small>(0/1)</small></i><input id='debugRemoteEnabled' name='debugRemoteEnabled' type='number' min='0' max='1' value='{debugRemoteEnabled}'>";
 const char HTML_SETTINGS_BTN_SAVE_FORM_END[] PROGMEM ="<br/><br/><button type='submit'>Save</button></form>";
 const char HTML_SETTINGS_BTN_BACK[] PROGMEM ="<hr><a href='/'><button>Back</button></a>";
 
@@ -220,9 +228,7 @@ const char HTML_MULTI_BTN_BACK[] PROGMEM = "<hr><a href='/'><button>Back</button
 
 //*****************************************************************************************************************//
 void setup() {
-#ifdef DEBUG_ESPNODE
     debugSetup();
-#endif
 
     configRead();
 
@@ -241,10 +247,14 @@ void setup() {
 #ifdef MULTI_SENSOR_MODE
     multiSetup();
 #endif
+
+    debugSetupFinalize();
 }
 
 //*****************************************************************************************************************//
 void loop() {
+    debugLoop();
+
     wifiLoop();
 
     mqttLoop();
@@ -273,9 +283,7 @@ void nodeSetup() {
 }
 
 void nodeReset() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("RESET: reset"));
-#endif
 
     mqttSendAvailable(true);
     delay(500);
@@ -284,34 +292,68 @@ void nodeReset() {
 }
 
 //***** Debug Functions ****//
-#ifdef DEBUG_ESPNODE
+
 void debugSetup() {
+    // Setup serial for debug output
     Serial.begin(115200);
     Serial.println();
-    Serial.println("********************************************");
 
+    // Setup telnet server for remote debug output
+    debugRemote.begin(uniqueNodeName); // Initialize the WiFi server
+    debugRemote.setResetCmdEnabled(true); // Enable the reset command
+    debugRemote.showProfiler(true); // Profiler (Good to measure times, to optimize codes)
+    debugRemote.showColors(true); // Colors
+
+    debugPrintln(String(F("********************************************************************************")));
     debugPrintln(String(F("SYSTEM: Starting ")) + String(fwName) + String(F(" v")) + String(fwVersion));
+    debugPrintln(String(F("SYSTEM: debug server enabled at - ")) + WiFi.localIP().toString());
+}
+
+void debugSetupFinalize() {
+    if (!debugSerialEnabled) {
+        debugPrintln(String(F("SYSTEM: Stopping serial debug due to configuration")));
+
+       Serial.flush();
+       Serial.end();
+    }
+
+    if (!debugRemoteEnabled) {
+        debugPrintln(String(F("SYSTEM: Stopping remote debug due to configuration")));
+
+        debugRemote.stop();
+    }
+}
+
+void debugLoop() {
+    if (debugRemoteEnabled) {
+        debugRemote.handle();
+    }
 }
 
 void debugPrintln(String debugText) {
-    String debugTimeText = "[+" + String(float(millis()) / 1000, 3) + "s] " + debugText;
+    if (!debugSerialEnabled && !debugRemoteEnabled) {
+        // No debug enabled so do nothing
+        return;
+    }
 
-    Serial.println(debugTimeText);
-    Serial.flush();
-}
+    if (debugSerialEnabled || debugRemoteEnabled) {
+        String debugTimeText = "[+" + String(float(millis()) / 1000, 3) + "s] " + debugText;
 
-void debugPrint(String debugText) {
-    Serial.print(debugText);
-    Serial.flush();
+        if (debugSerialEnabled) {
+            Serial.println(debugTimeText);
+            Serial.flush();
+        }
+
+        if (debugRemoteEnabled) {
+            debugRemote.println(debugTimeText);
+        }
+    }
 }
-#endif
 
 //***** Config Functions *****//
 void configRead() {
     // Read saved config.json from SPIFFS
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("SPIFFS: mounting SPIFFS"));
-#endif
 
 #ifdef ESP8266
     if (SPIFFS.begin()) {
@@ -320,10 +362,8 @@ void configRead() {
     if (SPIFFS.begin(true)) {
 #endif
         if (SPIFFS.exists("/config.json")) { // File exists, reading and loading
-
-#ifdef DEBUG_ESPNODE
             debugPrintln(F("SPIFFS: reading /config.json"));
-#endif
+
             File configFile = SPIFFS.open("/config.json", "r");
             if (configFile) {
                 size_t configFileSize = configFile.size(); // Allocate a buffer to store contents of the file.
@@ -336,7 +376,6 @@ void configRead() {
                 if (jsonError) { // Couldn't parse the saved config
                     bool removedJson = SPIFFS.remove("/config.json");
 
-#ifdef DEBUG_ESPNODE
                     debugPrintln(String(F("SPIFFS: [ERROR] Failed to parse /config.json: ")) + String(jsonError.c_str()));
 
                     if (removedJson) {
@@ -346,7 +385,6 @@ void configRead() {
                         debugPrintln(String(F("SPIFFS: [ERROR] Corrupt file /config.json could not be removed")));
 
                     }
-#endif
                 }
                 else {
                     // Read node configuration
@@ -380,37 +418,36 @@ void configRead() {
                         strcpy(mqttTopic, configJson["mqttTopic"]);
                     }
 
+                    // Read Debug configuration
+                    if (!configJson["debugSerialEnabled"].isNull()) {
+                        debugSerialEnabled = configJson["debugSerialEnabled"];
+                    }
+                    if (!configJson["debugRemoteEnabled"].isNull()) {
+                        debugRemoteEnabled = configJson["debugRemoteEnabled"];
+                    }
+
                     // Print read JSON configuration
                     String configJsonStr;
                     serializeJson(configJson, configJsonStr);
-#ifdef DEBUG_ESPNODE
+
                     debugPrintln(String(F("SPIFFS: parsed json:")) + configJsonStr);
-#endif
                 }
             }
             else {
-#ifdef DEBUG_ESPNODE
                 debugPrintln(F("SPIFFS: [ERROR] File not found /config.json"));
-#endif
             }
         }
         else {
-#ifdef DEBUG_ESPNODE
             debugPrintln(F("SPIFFS: [WARNING] /config.json not found, will be created on first config save"));
-#endif
         }
     }
     else {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("SPIFFS: [ERROR] Failed to mount FS"));
-#endif
     }
 }
 
 void configSave() { // Save the parameters to config.json
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("SPIFFS: Saving config"));
-#endif
     DynamicJsonDocument jsonConfigValues(CONFIG_SIZE);
 
     // Save node configuration
@@ -425,11 +462,13 @@ void configSave() { // Save the parameters to config.json
     jsonConfigValues["mqttPassword"] = mqttPassword;
     jsonConfigValues["mqttTopic"] = mqttTopic;
 
+    // Save Debug configuration
+    jsonConfigValues["debugSerialEnabled"] = debugSerialEnabled;
+    jsonConfigValues["debugRemoteEnabled"] = debugRemoteEnabled;
+
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("SPIFFS: Failed to open config file for writing"));
-#endif
     }
     else {
         serializeJson(jsonConfigValues, configFile);
@@ -438,48 +477,42 @@ void configSave() { // Save the parameters to config.json
         // Print saved JSON configuration
         String configJsonStr;
         serializeJson(jsonConfigValues, configJsonStr);
-#ifdef DEBUG_ESPNODE
+
         debugPrintln(String(F("SPIFFS: saved json:")) + configJsonStr);
-#endif
     }
 
     delay(500);
 }
 
 void configClear(bool all) { // Clear out all local storage
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("RESET: Formatting SPIFFS"));
-#endif
+
     SPIFFS.format();
 
     wifiResetSettings();
 
     EEPROM.begin(512);
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("Clearing EEPROM..."));
-#endif
+
     for (uint16_t i = 0; i < EEPROM.length(); i++) {
         EEPROM.write(i, 0);
     }
-#ifdef DEBUG_ESPNODE
+
     debugPrintln(F("RESET: Rebooting device"));
-#endif
     nodeReset();
 }
 
 //***** WiFi Functions ****//
 void wifiResetSettings() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("WIFI: Clearing WiFi settings..."));
-#endif
+
     WiFiManager wifiManager;
     wifiManager.resetSettings();
 }
 
 void wifiConfig(String wifiSsid, String wifiPass) {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("WIFI: Changing to WiFi network")) + wifiSsid + String(F("|")) + wifiPass + String(F("...")));
-#endif
+
     WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
     delay(1000);
@@ -532,15 +565,13 @@ void mqttConnect() {
             if (mqttClient.connected()) {
                 mqttRetryMillis = 0;
                 mqttAvailableMsgPending = true;
-#ifdef DEBUG_ESPNODE
+
                 debugPrintln(String(F("MQTT: Connection established to ")) + String(mqttServer));
-#endif
             }
             else {
                 mqttRetryMillis = millis();
-#ifdef DEBUG_ESPNODE
+
                 debugPrintln(String(F("MQTT: Connection could not be established - failed with rc ")) + String(mqttClient.returnCode()));
-#endif
             }
         }
     }
@@ -575,31 +606,23 @@ bool mqttSend(String topic, String cmd) {
 
 bool mqttSendAvailable(bool reset) {
     if (reset) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MQTT: Preparing reset, sending available --> false.")) + String(mqttServer));
-#endif
 
         return mqttSend(mqttGetNodeTopic(mqttAvailableSubTopic), String(F("false")));
     }
 
     if (mqttAvailableMsgPending) {
-
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MQTT: Sending pending available state --> true.")));
-#endif
+
         mqttAvailableMsgPending = !mqttSend(mqttGetNodeTopic(mqttAvailableSubTopic), String(F("true")));
 
 #ifdef MULTI_SENSOR_MODE
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MQTT: Sending limit & hold time for multi-sensor/smoke detector.")));
-#endif
 
         mqttAvailableMsgPending = !mqttSend(mqttGetNodeTopic(String(F("smoke/limit"))), String(multiMqSmokeLimit));
         mqttAvailableMsgPending = !mqttSend(mqttGetNodeTopic(String(F("smoke/holdtime"))), String(multiMqSmokeHoldTime));
 
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MQTT: Sending hold time for multi-sensor/motion detector.")));
-#endif
 
         mqttAvailableMsgPending = !mqttSend(mqttGetNodeTopic(String(F("motion/holdtime"))), String(multiMotionHoldTime));
 #endif
@@ -611,6 +634,10 @@ bool mqttSendAvailable(bool reset) {
     }
 
     return true;
+}
+
+void mqttSendAvailableResend() {
+    mqttAvailableMsgPending = true;
 }
 
 void mqttLoop() {
@@ -648,9 +675,7 @@ void webSetup() {
     webServer.onNotFound(webHandleNotFound);
     webServer.begin();
 
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: Server started @ http://")) + WiFi.localIP().toString());
-#endif
 }
 
 void webCheckAuth() {
@@ -724,9 +749,7 @@ void webEndHttpMsg() {
 }
 
 void webHandleRoot() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleRoot called from client: ")) + webServer.client().remoteIP().toString());
-#endif
 
     webStartHttpMsg(String(F("Navigation")), 200);
 
@@ -734,6 +757,7 @@ void webHandleRoot() {
 #ifdef RFID_MODE
     webSendHttpContent(HTML_ROOT_RFID);
 #endif
+
 #ifdef MULTI_SENSOR_MODE
     webSendHttpContent(HTML_ROOT_MULTI);
 #endif
@@ -741,15 +765,11 @@ void webHandleRoot() {
 
     webEndHttpMsg();
 
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleRoot page sent.")));
-#endif
 }
 
 void webHandleSettings() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleSettings called from client: ")) + webServer.client().remoteIP().toString());
-#endif
 
     webStartHttpMsg(String(F("Settings")), 200);
 
@@ -771,21 +791,20 @@ void webHandleSettings() {
     webSendHttpContent(HTML_SETTINGS_MQTT_TOPIC, String(F("{mqttTopic}")), (strlen(mqttTopic) != 0) ? String(mqttTopic) : mqttGetDefaultTopic());
     webSendHttpContent(HTML_SETTINGS_MQTT_STATUS, String(F("{mqttStatus}")), (mqttClient.connected()) ? String(F("connected")) : String(F("diconnected")));
 
+    webSendHttpContent(HTML_SETTINGS_DEBUG_SERIAL, String(F("{debugSerialEnabled}")), (debugSerialEnabled ? String(F("1")) : String(F("0"))));
+    webSendHttpContent(HTML_SETTINGS_DEBUG_REMOTE, String(F("{debugRemoteEnabled}")), (debugRemoteEnabled ? String(F("1")) : String(F("0"))));
+
     webSendHttpContent(HTML_SETTINGS_BTN_SAVE_FORM_END);
     webSendHttpContent(HTML_SETTINGS_BTN_BACK);
 
     webEndHttpMsg();
 
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleSettings page sent.")));
-#endif
 }
 
 void webHandleSaveSettings() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleSaveSettings called from client: ")) + webServer.client().remoteIP().toString());
     debugPrintln(String(F("HTTP: Checking for changed settings...")));
-#endif
 
     bool configShouldSave = false;
     //check if node settings have changed
@@ -848,12 +867,23 @@ void webHandleSaveSettings() {
         webServer.arg(String(F("mqttTopic"))).toCharArray(mqttTopic, 128);
     }
 
+    //check if debug settings have changed
+    if (webServer.arg(String(F("debugSerialEnabled"))) != String(debugSerialEnabled)) {
+        configShouldSave = true;
+
+        debugSerialEnabled = (webServer.arg(String(F("debugSerialEnabled"))).toInt() > 0);
+    }
+
+    if (webServer.arg(String(F("debugRemoteEnabled"))) != String(debugRemoteEnabled)) {
+        configShouldSave = true;
+
+        debugRemoteEnabled = (webServer.arg(String(F("debugRemoteEnabled"))).toInt() > 0);
+    }
+
     // Process config or wifi changes
     if (configShouldSave || shouldSaveWifi) {
         // Config updated, notify user and trigger write of configurations or wifi settings7
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("HTTP: Sending /saveSettings page to client connected from: ")) + webServer.client().remoteIP().toString());
-#endif
 
         webStartHttpMsg(String(F("")), HTML_SAVESETTINGS_START_REDIR_15SEC, 200, String(F("/")));
         webSendHttpContent(HTML_SAVESETTINGS_SAVE_RESTART, HTML_REPLACE_REDIRURL, String(F("/")));
@@ -871,24 +901,19 @@ void webHandleSaveSettings() {
     }
     else {
         // No change found, notify user and link back to config page
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("HTTP: Sending /saveSettings page to client connected from: ")) + webServer.client().remoteIP().toString());
-#endif
 
         webStartHttpMsg(String(F("")), HTML_SAVESETTINGS_START_REDIR_3SEC, 200, String(F("/settings")));
         webSendHttpContent(HTML_SAVESETTINGS_NOCHANGE, HTML_REPLACE_REDIRURL, String(F("/settings")));
         webEndHttpMsg();
     }
 
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleSaveSettings page sent.")));
-#endif
 }
 
 void webHandleStatus() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleStatus called from client: ")) + webServer.client().remoteIP().toString());
-#endif
+
     webStartHttpMsg(String(F("Status")), 200);
 
     webSendHttpContent(HTML_STATUS_FW_NAME, String(F("{firmwareName}")), String(fwName));
@@ -905,15 +930,12 @@ void webHandleStatus() {
     webSendHttpContent(HTML_STATUS_BTN_BACK);
 
     webEndHttpMsg();
-#ifdef DEBUG_ESPNODE
+
     debugPrintln(String(F("HTTP: WebHandleStatus page sent.")));
-#endif
 }
 
 void webHandleNotFound() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleNotFound called from client: ")) + webServer.client().remoteIP().toString());
-#endif
 
     webStartHttpMsg(String(F("File Not Found\n\n")), 404);
     webSendHttpContent(String(F("URI: ")));
@@ -929,9 +951,8 @@ void webHandleNotFound() {
     }
 
     webEndHttpMsg();
-#ifdef DEBUG_ESPNODE
+
     debugPrintln(String(F("HTTP: WebHandleNotFound page sent.")));
-#endif
 }
 
 void webLoop() {
@@ -949,9 +970,7 @@ void rfidSetup() {
     rfidInitNuid();
 
     //check rfid connection and firmware version
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("RFID: Connecting rfid controller...")));
-#endif
 
     rfidControllerData = "";
 
@@ -962,14 +981,10 @@ void rfidSetup() {
     if ((version == 0x00) || (version == 0xFF)) {
         rfidControllerData = String(F("Communication failure, is the MFRC522 properly connected?"));
 
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("RFID: ")) + rfidControllerData);
-#endif
     }
     else {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("RFID: Connected rfid controller - ")) + rfidControllerData);
-#endif
     }
 }
 
@@ -1007,28 +1022,17 @@ void rfidLoop() {
     if (!rfid.PICC_ReadCardSerial())
         return;
 
-#ifdef DEBUG_ESPNODE
     debugPrint(F("RFID: PICC type - "));
-#endif
-
     MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
-
-#ifdef DEBUG_ESPNODE
     debugPrintln(rfid.PICC_GetTypeName(piccType));
-#endif
 
     // Check is the PICC of Classic MIFARE type
     if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI && piccType != MFRC522::PICC_TYPE_MIFARE_1K && piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("RFID: Your tag is not of type MIFARE Classic."));
-#endif
-
         return;
     }
     if (rfid.uid.uidByte[0] != rfidNuidPICC[0] || rfid.uid.uidByte[1] != rfidNuidPICC[1] || rfid.uid.uidByte[2] != rfidNuidPICC[2] || rfid.uid.uidByte[3] != rfidNuidPICC[3]) {
-#ifdef DEBUG_ESPNODE
         debugPrint(F("RFID: A new card has been detected - "));
-#endif
 
         // Store NUID into nuidPICC array and set nuidString
         rfidNuidString = "";
@@ -1036,19 +1040,14 @@ void rfidLoop() {
             rfidNuidPICC[i] = rfid.uid.uidByte[i];
             rfidNuidString += rfid.uid.uidByte[i];
         }
-
-#ifdef DEBUG_ESPNODE
         debugPrintln(rfidNuidString);
-#endif
 
         // Trigger send rfid uid via mqtt and set timestamp
         rfidCardPending = true;
         rfidLastReadMillis = millis();
     }
     else {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("RFID: Card read previously."));
-#endif
     }
 
     // Halt PICC
@@ -1058,9 +1057,8 @@ void rfidLoop() {
 }
 
 void webHandleRfid() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleRfid called from client: ")) + webServer.client().remoteIP().toString());
-#endif
+
     webStartHttpMsg(String(F("RFID")), 200);
 
     webSendHttpContent(HTML_RFID_STATUS, String(F("{rfidControllerData}")), rfidControllerData);
@@ -1068,9 +1066,8 @@ void webHandleRfid() {
     webSendHttpContent(HTML_RFID_BTN_BACK);
 
     webEndHttpMsg();
-#ifdef DEBUG_ESPNODE
+
     debugPrintln(String(F("HTTP: WebHandleRfid page sent.")));
-#endif
 }
 #endif
 
@@ -1084,11 +1081,9 @@ void multiSetup() {
     Wire.begin(D2, D1);
     multiAdcSensorInitialized = multiAdc.begin();
 
-#ifdef DEBUG_ESPNODE
     if (!multiAdcSensorInitialized) {
         debugPrintln(String(F("MULTI: Failed to initialize ADC.")));
     }
-#endif
 
     if (multiAdcSensorInitialized) {
         // Setup MQ2 sensor
@@ -1118,9 +1113,7 @@ bool multiMqWarmUp() {
         if (multiMqWarmupTimer == 0) {
             multiMqWarmupTimer = millis();
 
-#ifdef DEBUG_ESPNODE
             debugPrintln(String(F("MULTI: MQ2 sensor warming up for ")) + String(MULTI_MQ2_WARMUP_SEC) + String(F(" sec...")));
-#endif
         }
         else {
             secondsPassed = (millis() - multiMqWarmupTimer) / 1000;
@@ -1129,9 +1122,8 @@ bool multiMqWarmUp() {
         multiMqWarmedUp = (secondsPassed >= MULTI_MQ2_WARMUP_SEC);
 
         if (multiMqWarmedUp) {
-#ifdef DEBUG_ESPNODE
             debugPrintln(String(F("MULTI: MQ2 sensor warmed up.")));
-#endif
+
             multiMqSensorState = String(F("Pending: Calibrating sensor..."));
         }
     }
@@ -1145,9 +1137,7 @@ bool multiMqCalibrate() {
     }
 
     if (multiMqWarmUp() && !multiMqCalibrated) {
-#ifdef DEBUG_ESPNODE
         debugPrintln("MULTI: MQ sensor calibrating please wait...");
-#endif
 
         float calcR0 = 0;
         for (int i = 1; i <= 10; i++) {
@@ -1159,24 +1149,18 @@ bool multiMqCalibrate() {
         if (isinf(calcR0)) {
             multiMqSensorState = String(F("Error: Connection issue founded, R0 is infite."));
 
-#ifdef DEBUG_ESPNODE
             debugPrintln("MULTI: Warning, MQ sensor connection issue founded, R0 is infite (open circuit detected) please check your wiring and supply.");
-#endif
         }
         else if (calcR0 == 0) {
             multiMqSensorState = String(F("Error: Connection issue founded, R0 i zero."));
 
-#ifdef DEBUG_ESPNODE
             debugPrintln("MULTI: Warning, MQ sensor connection issue founded, R0 is zero (Analog pin with short circuit to ground) please check your wiring and supply");
-#endif
         }
         else {
             multiMqCalibrated = true;
             multiMqSensorState = String(F("Ready..."));
 
-#ifdef DEBUG_ESPNODE
             debugPrintln("MULTI: MQ sensor calibrated.");
-#endif
         }
     }
 
@@ -1186,9 +1170,7 @@ bool multiMqCalibrate() {
 void multiMqLoop() {
     // Send pending message if needed
     if (multiMqSmokePending) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MULTI: MQ sensor sending state ---> ")) + (multiMqSmokeDetected ? String(F("detected")) : String(F("none"))));
-#endif
 
         multiMqSmokePending = !mqttSend(mqttGetNodeTopic(String(F("smoke"))), multiMqSmokeDetected ? String(F("detected")) : String(F("none")));
     }
@@ -1210,9 +1192,8 @@ void multiMqLoop() {
             multiMqSmokeHoldTimer = millis();
         }
         else {
-#ifdef DEBUG_ESPNODE
             debugPrintln(String(F("MULTI: Smoke detected --> setting timer.")));
-#endif
+
             // Timer should be set for the first time
             multiMqSmokeHoldTimer = millis();
             // Set pending message, if timer is set for the first time and return from function
@@ -1230,9 +1211,8 @@ void multiMqLoop() {
     }
 
     if (secondsPassed >= multiMqSmokeHoldTime) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MULTI: Smoke hold time expired --> setting pending message.")));
-#endif
+
         // Set pending message, if hold time expired
         multiMqSmokePending = true;
         multiMqSmokeDetected = smokeDetected;
@@ -1258,9 +1238,7 @@ void multiLightLoop() {
 void multiMotionLoop() {
 // Send pending message if needed
     if (multiMotionPending) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MULTI: Motion sensor sending state ---> ")) + (multiMotionDetected ? String(F("detected")) : String(F("none"))));
-#endif
 
         multiMotionPending = !mqttSend(mqttGetNodeTopic(String(F("motion"))), multiMotionDetected ? String(F("detected")) : String(F("none")));
     }
@@ -1278,9 +1256,8 @@ void multiMotionLoop() {
             multiMotionHoldTimer = millis();
         }
         else {
-#ifdef DEBUG_ESPNODE
             debugPrintln(String(F("MULTI: Motion detected --> setting timer.")));
-#endif
+
             // Timer should be set for the first time
             multiMotionHoldTimer = millis();
             // Set pending message, if timer is set for the first time and return from function
@@ -1298,9 +1275,8 @@ void multiMotionLoop() {
     }
 
     if (secondsPassed >= multiMotionHoldTime) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("MULTI: Motion hold time expired --> setting pending message.")));
-#endif
+
         // Set pending message, if hold time expired
         multiMotionPending = true;
         multiMotionDetected = motionDetected;
@@ -1317,9 +1293,7 @@ void multiLoop() {
 
 void multiConfigRead() {
     // Read saved multiConfig.json from SPIFFS
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("SPIFFS: mounting SPIFFS"));
-#endif
 
 #ifdef ESP8266
     if (SPIFFS.begin()) {
@@ -1328,10 +1302,8 @@ void multiConfigRead() {
     if (SPIFFS.begin(true)) {
 #endif
         if (SPIFFS.exists("/multiConfig.json")) { // File exists, reading and loading
-
-#ifdef DEBUG_ESPNODE
             debugPrintln(F("SPIFFS: reading /multiConfig.json"));
-#endif
+
             File configFile = SPIFFS.open("/multiConfig.json", "r");
             if (configFile) {
                 size_t configFileSize = configFile.size(); // Allocate a buffer to store contents of the file.
@@ -1344,7 +1316,6 @@ void multiConfigRead() {
                 if (jsonError) { // Couldn't parse the saved config
                     bool removedJson = SPIFFS.remove("/multiConfig.json");
 
-#ifdef DEBUG_ESPNODE
                     debugPrintln(String(F("SPIFFS: [ERROR] Failed to parse /multiConfig.json: ")) + String(jsonError.c_str()));
 
                     if (removedJson) {
@@ -1354,7 +1325,6 @@ void multiConfigRead() {
                         debugPrintln(String(F("SPIFFS: [ERROR] Corrupt file /multiConfig.json could not be removed")));
 
                     }
-#endif
                 }
                 else {
                     // Read Multi Sensor configuration
@@ -1377,34 +1347,25 @@ void multiConfigRead() {
                     // Print read JSON configuration
                     String configJsonStr;
                     serializeJson(configJson, configJsonStr);
-#ifdef DEBUG_ESPNODE
+
                     debugPrintln(String(F("SPIFFS: parsed json:")) + configJsonStr);
-#endif
                 }
             }
             else {
-#ifdef DEBUG_ESPNODE
                 debugPrintln(F("SPIFFS: [ERROR] File not found /multiConfig.json"));
-#endif
             }
         }
         else {
-#ifdef DEBUG_ESPNODE
             debugPrintln(F("SPIFFS: [WARNING] /multiConfig.json not found, will be created on first config save"));
-#endif
         }
     }
     else {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("SPIFFS: [ERROR] Failed to mount FS"));
-#endif
     }
 }
 
 void multiConfigSave() { // Save the parameters to config.json
-#ifdef DEBUG_ESPNODE
     debugPrintln(F("SPIFFS: Saving multisensor config"));
-#endif
     DynamicJsonDocument jsonConfigValues(CONFIG_SIZE);
 
     // Save multi sensor configuration
@@ -1416,9 +1377,7 @@ void multiConfigSave() { // Save the parameters to config.json
 
     File configFile = SPIFFS.open("/multiConfig.json", "w");
     if (!configFile) {
-#ifdef DEBUG_ESPNODE
         debugPrintln(F("SPIFFS: Failed to open config file for writing"));
-#endif
     }
     else {
         serializeJson(jsonConfigValues, configFile);
@@ -1427,18 +1386,15 @@ void multiConfigSave() { // Save the parameters to config.json
         // Print saved JSON configuration
         String configJsonStr;
         serializeJson(jsonConfigValues, configJsonStr);
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("SPIFFS: saved json:")) + configJsonStr);
-#endif
     }
 
     delay(500);
 }
 
 void webHandleMultiSensor() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: WebHandleMultiSensor called from client: ")) + webServer.client().remoteIP().toString());
-#endif
+
     webStartHttpMsg(String(F("Multi Sensor")), 200);
 
     webSendHttpContent(HTML_MULTI_FORM_START);
@@ -1461,16 +1417,13 @@ void webHandleMultiSensor() {
     webSendHttpContent(HTML_MULTI_BTN_BACK);
 
     webEndHttpMsg();
-#ifdef DEBUG_ESPNODE
+
     debugPrintln(String(F("HTTP: WebHandleMultiSensor page sent.")));
-#endif
 }
 
 void webHandleMultiSensorSave() {
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: webHandleMultiSensorSave called from client: ")) + webServer.client().remoteIP().toString());
     debugPrintln(String(F("HTTP: Checking for changed settings...")));
-#endif
 
     bool configShouldSave = false;
     //check if multi sensor settings have changed
@@ -1503,9 +1456,7 @@ void webHandleMultiSensorSave() {
 // Process config or wifi changes
     if (configShouldSave) {
         // Config updated, notify user and trigger write of configurations or wifi settings
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("HTTP: Sending /saveMulti page to client connected from: ")) + webServer.client().remoteIP().toString());
-#endif
 
         webStartHttpMsg(String(F("")), HTML_SAVESETTINGS_START_REDIR_15SEC, 200, String(F("/multi")));
         webSendHttpContent(HTML_SAVESETTINGS_SAVE_NORESTART, HTML_REPLACE_REDIRURL, String(F("/multi")));
@@ -1513,22 +1464,18 @@ void webHandleMultiSensorSave() {
 
         if (configShouldSave) {
             multiConfigSave();
+            mqttSendAvailableResend();
         }
     }
     else {
         // No change found, notify user and link back to config page
-#ifdef DEBUG_ESPNODE
         debugPrintln(String(F("HTTP: Sending /saveMulti page to client connected from: ")) + webServer.client().remoteIP().toString());
-#endif
 
         webStartHttpMsg(String(F("")), HTML_SAVESETTINGS_START_REDIR_3SEC, 200, String(F("/multi")));
         webSendHttpContent(HTML_SAVESETTINGS_NOCHANGE, HTML_REPLACE_REDIRURL, String(F("/multi")));
         webEndHttpMsg();
     }
 
-#ifdef DEBUG_ESPNODE
     debugPrintln(String(F("HTTP: webHandleMultiSensorSave page sent.")));
-#endif
 }
-
 #endif
