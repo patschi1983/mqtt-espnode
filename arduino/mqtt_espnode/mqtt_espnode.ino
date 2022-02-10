@@ -24,7 +24,6 @@
 #include <WiFiManager.h>
 #include <MQTTClient.h>
 #include <RemoteDebug.h>
-#include <OneButton.h>
 
 #ifdef ESP8266
 #include <ESP8266WebServer.h>
@@ -107,30 +106,30 @@ boolean mqttAvailableMsgPending = false;              // MQTT flag indicating if
 #define BTN_CMD_MU "CmdMu"
 #define BTN_CMD_LO "CmdLo"
 
-int currentButtonIndex = 0;                       // Control variable for loop
+int btnCurrentIndex = 0;                       // Control variable for loop
 
 const char BTN_CMD_SEPERATOR[2] = "#";
 
 #ifdef ESP8266
 #ifdef RFID_MODE
-const uint16_t NUM_OF_BUTTONS = 3;
-int btnId[NUM_OF_BUTTONS] = { 0, 1, 2 };
-const char btnName[NUM_OF_BUTTONS][16] = { "btnD1", "btnD2", "btnA0" };
-char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "" };
-char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "" };
-char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "" };
-char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "" };
-int btnPins[NUM_OF_BUTTONS] = { D1, D2, A0 };
+const uint16_t NUM_OF_BUTTONS = 4;
+int btnId[NUM_OF_BUTTONS] = { 0, 1, 2, 3 };
+const char btnName[NUM_OF_BUTTONS][16] = { "btnD0", "btnD1", "btnD2", "btnA0" };
+char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "", "" };
+char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "", "" };
+char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "", "" };
+char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "", "" };
+int btnPins[NUM_OF_BUTTONS] = { D0, D1, D2, A0 };
 OneButton *btnArray[NUM_OF_BUTTONS];
 #else
-const uint16_t NUM_OF_BUTTONS = 6;
-int btnId[NUM_OF_BUTTONS] = { 0, 1, 2, 3, 4, 5 };
-const char btnName[NUM_OF_BUTTONS][16] = { "btnD1", "btnD2", "btnD5", "btnD6", "btnD7", "btnA0" };
-char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
-char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
-char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
-char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "" };
-int btnPins[NUM_OF_BUTTONS] = { D1, D2, D5, D6, D7, A0 };
+const uint16_t NUM_OF_BUTTONS = 8;
+int btnId[NUM_OF_BUTTONS] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+const char btnName[NUM_OF_BUTTONS][16] = { "btnD0", "btnD1", "btnD2", "btnD5", "btnD6", "btnD7", "btnD8", "btnA0" };
+char btnMqttCmdSingle[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "" };
+char btnMqttCmdDouble[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "" };
+char btnMqttCmdMulti[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "" };
+char btnMqttCmdLong[NUM_OF_BUTTONS][128] = { "", "", "", "", "", "", "", "" };
+int btnPins[NUM_OF_BUTTONS] = { D0, D1, D2, D5, D6, D7, D8, A0 };
 OneButton *btnArray[NUM_OF_BUTTONS];
 #endif
 
@@ -273,7 +272,6 @@ const char HTML_BUTTONS_CMD_LONG[] PROGMEM = "<br/><b>Command Long</b> <i><small
 const char HTML_BUTTONS_CMD_MQTT[] PROGMEM = "<input id='{btnCfgId}' name='{btnCfgId}' maxlength=127 placeholder='{btnDefaultCmd}' value='{btnCmd}'>";
 const char HTML_BUTTONS_FORM_END[] PROGMEM ="<br/><br/><button type='submit'>Save</button></form>";
 const char HTML_BUTTONS_BTN_BACK[] PROGMEM = "<hr><a href='/'><button>Back</button></a>";
-
 #endif
 
 //***** HTML Text - RFID *****//
@@ -1100,6 +1098,8 @@ void btnSingleClick(void *btnIndex) {
     else {
         debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for singleclick defined [")) + mqttCmd + String(F("]")));
     }
+
+    btnArray[index]->reset();
 }
 
 void btnDoubleClick(void *btnIndex) {
@@ -1118,6 +1118,8 @@ void btnDoubleClick(void *btnIndex) {
     else {
         debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for doubleclick defined [")) + mqttCmd + String(F("]")));
     }
+
+    btnArray[index]->reset();
 }
 
 void btnMultiClick(void *btnIndex) {
@@ -1136,6 +1138,8 @@ void btnMultiClick(void *btnIndex) {
     else {
         debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for multiclick defined [")) + mqttCmd + String(F("]")));
     }
+
+    btnArray[index]->reset();
 }
 
 void btnLongPressStart(void *btnIndex) {
@@ -1154,19 +1158,29 @@ void btnLongPressStart(void *btnIndex) {
     else {
         debugPrintln(String(F("** BTN: No MQTT[Topic|Cmd] for longclick defined [")) + mqttCmd + String(F("]")));
     }
+
+    btnArray[index]->reset();
 }
 
 void btnLoop() {
-    btnArray[currentButtonIndex]->tick();
+#ifdef ESP8266
+    if (btnPins[btnCurrentIndex] == A0) {
+        btnArray[btnCurrentIndex]->tick((analogRead(A0) > 100));
+    }
+    else {
+        btnArray[btnCurrentIndex]->tick();
+    }
+#else
+    btnArray[btnCurrentIndex]->tick();
+#endif
 
-    currentButtonIndex++;
-
-    if (currentButtonIndex >= NUM_OF_BUTTONS) {
-        currentButtonIndex = 0;
+    // If button is idle (no click received), skip to the next button - else stay with the button
+    if (btnArray[btnCurrentIndex]->isIdle()) {
+        btnCurrentIndex++;
     }
 
-    for (int index = 0; index < NUM_OF_BUTTONS; index++) {
-        btnArray[index]->tick();
+    if (btnCurrentIndex >= NUM_OF_BUTTONS) {
+        btnCurrentIndex = 0;
     }
 }
 
