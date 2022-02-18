@@ -1,5 +1,5 @@
-//#define RFID_MODE
-#define BUTTON_MODE
+#define RFID_MODE
+//#define BUTTON_MODE
 
 //#define MULTI_SENSOR_MODE
 
@@ -40,7 +40,7 @@
 #endif
 
 #ifdef RFID_MODE
-#include <MFRC522.h>
+#include <Adafruit_PN532.h>
 #endif
 
 #ifdef MULTI_SENSOR_MODE
@@ -51,7 +51,7 @@
 
 //***** ESP Node *****//
 char fwName[16] = "mqtt_espnode";         // Name of the firmware
-char fwVersion[8] = "0.1-2";              // Version of the firmware
+char fwVersion[8] = "0.1-3";              // Version of the firmware
 byte espMac[6];                           // Byte array to store our MAC address
 
 char nodeName[32] = "espnode";                  // Nodes name - default value, may be overridden
@@ -152,17 +152,17 @@ OneButton *btnArray[NUM_OF_BUTTONS];
 //***** RFID *****//
 #ifdef RFID_MODE
 #ifdef ESP8266
-// RST=D3, SDA=D8, SCK=D5, MOSI=D7, MISO=D6
-#define SS_PIN D8
-#define RST_PIN D3
+#define RFID_IRQ_PIN   (D3)
+#define RFID_RESET_PIN (D4)
 #elif ESP32
 #error "Wrong board - ESP8266 must be used."   // "Wrong board - ESP8266 or ESP32 must be used."
 #else
 #error "Wrong board - ESP8266 must be used."   // "Wrong board - ESP8266 or ESP32 must be used."
 #endif
 
-MFRC522 rfid(SS_PIN, RST_PIN);
-byte rfidNuidPICC[4];
+Adafruit_PN532 rfid(RFID_IRQ_PIN, RFID_RESET_PIN);
+uint8_t rfidNuid[7];
+uint8_t rfidNuidLength;
 String rfidNuidString;
 String rfidControllerData;
 unsigned long rfidLastReadMillis = 0;
@@ -1410,8 +1410,7 @@ void webHandleSaveButtons() {
 #ifdef RFID_MODE
 
 void rfidSetup() {
-    SPI.begin(); // Init SPI bus
-    rfid.PCD_Init(); // Init MFRC522
+    rfid.begin(); // Init RFID
     delay(100);
 
     rfidInitNuid();
@@ -1419,26 +1418,35 @@ void rfidSetup() {
     //check rfid connection and firmware version
     debugPrintln(String(F("RFID: Connecting rfid controller...")));
 
-    rfidControllerData = "";
+    rfidControllerData = "not connected";
 
-    byte version = rfid.PCD_ReadRegister(MFRC522::PCD_Register::VersionReg);
-    rfidControllerData = "Firmware Version: " + String(version, HEX);
+    uint32_t version = rfid.getFirmwareVersion();
 
     // When 0x00 or 0xFF is returned, communication probably failed
     if ((version == 0x00) || (version == 0xFF)) {
-        rfidControllerData = String(F("Communication failure, is the MFRC522 properly connected?"));
+        rfidControllerData = String(F("Communication failure, is the rfid controller properly connected?"));
 
         debugPrintln(String(F("RFID: ")) + rfidControllerData);
     }
     else {
+        rfidControllerData = "Firmware Version: " + String((version >> 24) & 0xFF, HEX);
+
+        // Set the max number of retry attempts to read from a card
+        // This prevents us from waiting forever for a card, which is
+        // the default behaviour of the PN532.
+        rfid.setPassiveActivationRetries(0xFF);
+
+        // configure board to read RFID tags
+        rfid.SAMConfig();
+
         debugPrintln(String(F("RFID: Connected rfid controller - ")) + rfidControllerData);
     }
 }
 
 void rfidInitNuid() {
     //initialize key
-    for (byte i = 0; i < 4; i++) {
-        rfidNuidPICC[i] = 0xFF;
+    for (byte i = 0; i < 7; i++) {
+        rfidNuid[i] = 0xFF;
     }
 }
 
@@ -1463,31 +1471,18 @@ void rfidLoop() {
     }
 
     // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
-    if (!rfid.PICC_IsNewCardPresent())
-        return;
-    // Verify if the NUID has been readed
-    if (!rfid.PICC_ReadCardSerial())
+    if (!rfid.readPassiveTargetID(PN532_MIFARE_ISO14443A, &rfidNuid[0], &rfidNuidLength, 10))
         return;
 
-    debugPrint(F("RFID: PICC type - "));
-    MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
-    debugPrintln(rfid.PICC_GetTypeName(piccType));
-
-    // Check is the PICC of Classic MIFARE type
-    if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI && piccType != MFRC522::PICC_TYPE_MIFARE_1K && piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
-        debugPrintln(F("RFID: Your tag is not of type MIFARE Classic."));
-        return;
+    String newRfidNuidString = "";
+    for (byte i = 0; i < rfidNuidLength; i++) {
+        newRfidNuidString += rfidNuid[i];
     }
-    if (rfid.uid.uidByte[0] != rfidNuidPICC[0] || rfid.uid.uidByte[1] != rfidNuidPICC[1] || rfid.uid.uidByte[2] != rfidNuidPICC[2] || rfid.uid.uidByte[3] != rfidNuidPICC[3]) {
-        debugPrint(F("RFID: A new card has been detected - "));
 
-        // Store NUID into nuidPICC array and set nuidString
-        rfidNuidString = "";
-        for (byte i = 0; i < 4; i++) {
-            rfidNuidPICC[i] = rfid.uid.uidByte[i];
-            rfidNuidString += rfid.uid.uidByte[i];
-        }
-        debugPrintln(rfidNuidString);
+    if (rfidNuidString != newRfidNuidString) {
+        // Store NUID into variable
+        rfidNuidString = newRfidNuidString;
+        debugPrintln(String(F("RFID: A new card has been detected - ")) + rfidNuidString);
 
         // Trigger send rfid uid via mqtt and set timestamp
         rfidCardPending = true;
@@ -1496,11 +1491,6 @@ void rfidLoop() {
     else {
         debugPrintln(F("RFID: Card read previously."));
     }
-
-    // Halt PICC
-    rfid.PICC_HaltA();
-    // Stop encryption on PCD
-    rfid.PCD_StopCrypto1();
 }
 
 void webHandleRfid() {
